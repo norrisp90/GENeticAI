@@ -117,17 +117,53 @@ class AzureAIAgent:
             if PROJECT_CONNECTION_STRING:
                 self.add_debug_info("Using PROJECT_CONNECTION_STRING...")
                 try:
+                    # Updated syntax for latest azure-ai-projects library
                     self.client = AIProjectClient.from_connection_string(
-                        conn_str=PROJECT_CONNECTION_STRING,
-                        credential=credential
+                        PROJECT_CONNECTION_STRING,
+                        credential
                     )
                     self.add_debug_info("✅ Client created with connection string")
                 except Exception as client_error:
                     self.add_debug_info(f"❌ Failed to create client with connection string: {client_error}")
-                    raise
+                    
+                    # Try alternative initialization method
+                    self.add_debug_info("Trying alternative initialization method...")
+                    try:
+                        # Parse connection string manually if needed
+                        parts = {}
+                        for part in PROJECT_CONNECTION_STRING.split(';'):
+                            if '=' in part:
+                                key, value = part.split('=', 1)
+                                parts[key] = value
+                        
+                        endpoint = parts.get('Endpoint', '')
+                        subscription_id = parts.get('SubscriptionId', '')
+                        resource_group = parts.get('ResourceGroupName', '')
+                        project_name = parts.get('ProjectName', '')
+                        
+                        self.add_debug_info(f"Parsed - Endpoint: {endpoint[:50]}...")
+                        self.add_debug_info(f"Parsed - SubscriptionId: {subscription_id}")
+                        self.add_debug_info(f"Parsed - ResourceGroup: {resource_group}")
+                        self.add_debug_info(f"Parsed - ProjectName: {project_name}")
+                        
+                        # Try creating client with parsed parameters
+                        self.client = AIProjectClient(
+                            endpoint=endpoint,
+                            credential=credential,
+                            subscription_id=subscription_id,
+                            resource_group_name=resource_group,
+                            project_name=project_name
+                        )
+                        self.add_debug_info("✅ Client created with parsed connection string")
+                        
+                    except Exception as parse_error:
+                        self.add_debug_info(f"❌ Failed to parse connection string: {parse_error}")
+                        raise client_error
+                        
             elif all([AZURE_SUBSCRIPTION_ID, AZURE_RESOURCE_GROUP, AZURE_PROJECT_NAME]):
                 self.add_debug_info("Using individual Azure parameters...")
                 try:
+                    # Updated syntax for individual parameters
                     self.client = AIProjectClient(
                         credential=credential,
                         subscription_id=AZURE_SUBSCRIPTION_ID,
@@ -299,10 +335,19 @@ async def start():
     ).send()
     
     # Initialize Azure AI client
-    if azure_agent.initialize():
+    init_result = azure_agent.initialize()
+    
+    # ALWAYS show debug information, regardless of success or failure
+    debug_summary = azure_agent.get_debug_summary()
+    await cl.Message(
+        content=f"**🔍 Debug Information:**\n```\n{debug_summary}\n```",
+        author="System"
+    ).send()
+    
+    if init_result:
         agent_info = f"Agent ID: {azure_agent.agent.id}" if azure_agent.agent else "Unknown agent"
         await cl.Message(
-            content=f"✅ Connected to Azure AI Foundry using Managed Identity!\n\n{agent_info}\n\nHow can I help you today?",
+            content=f"✅ **Connected to Azure AI Foundry using Managed Identity!**\n\n{agent_info}\n\nHow can I help you today?",
             author="Assistant"
         ).send()
         
@@ -317,32 +362,30 @@ async def start():
             
     else:
         await cl.Message(
-            content="""❌ Failed to connect to Azure AI Foundry using Managed Identity.
+            content=f"""❌ **Failed to connect to Azure AI Foundry using Managed Identity.**
 
-**Check the Azure App Service logs for detailed error information.**
+**Please review the debug information above for specific error details.**
 
-**Common Issues & Solutions:**
+**Quick Troubleshooting Checklist:**
 
-🔧 **Managed Identity Issues:**
-- Enable system-assigned managed identity in App Service → Identity
-- Restart the App Service after enabling managed identity
+🔧 **Identity & Permissions:**
+- [ ] System-assigned managed identity enabled in App Service → Identity
+- [ ] **Azure AI Developer** role assigned to managed identity on Azure AI project
+- [ ] **Cognitive Services OpenAI User** role assigned (if using OpenAI models)
+- [ ] App Service restarted after enabling managed identity
 
-🔐 **Permission Issues:**
-- Assign **"Azure AI Developer"** role to the managed identity on the Azure AI project
-- Assign **"Cognitive Services OpenAI User"** role if using OpenAI models
-- Check role assignments in Azure AI project → Access Control (IAM)
+🌐 **Configuration:**
+- [ ] PROJECT_CONNECTION_STRING is correctly formatted
+- [ ] Azure AI project exists and is accessible
+- [ ] Network connectivity allows access to Azure AI services
 
-🌐 **Configuration Issues:**
-- Verify PROJECT_CONNECTION_STRING or individual Azure parameters
-- Ensure the Azure AI project exists and is accessible
-- Check network connectivity and firewall rules
+💡 **Next Steps:**
+1. Check the debug information above for the exact error
+2. Verify role assignments in Azure portal
+3. Ensure managed identity is properly configured
+4. Try restarting the App Service
 
-📋 **To get detailed logs:**
-1. Go to Azure App Service → Monitoring → Log stream
-2. Check the console output for detailed error messages
-3. Look for specific error codes and authentication failures
-
-Please check the Azure App Service logs and configuration, and try again.""",
+Please address the issues shown in the debug output and try again.""",
             author="System"
         ).send()
         cl.user_session.set("initialized", False)
@@ -382,7 +425,7 @@ async def main(message: cl.Message):
 @cl.on_chat_end
 async def end():
     """Clean up when chat ends"""
-    print("Chat session ended")
+    log_and_print("Chat session ended")
 
 if __name__ == "__main__":
     cl.run()
