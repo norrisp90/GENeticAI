@@ -8,7 +8,7 @@ from azure.ai.projects.models import (
 	MessageRole,
 )
 
-# Load environment variables
+# Load environment variables now
 load_dotenv()
 
 # Disable verbose connection logs
