@@ -28,6 +28,7 @@ class AzureAIAgent:
         self.agents_client = None
         self.agent = None
         self.thread = None
+        self._initialized = False
         
     async def initialize(self):
         """Initialize Azure AI Project client and agent"""
@@ -55,18 +56,20 @@ class AzureAIAgent:
             # Create a thread for this session
             self.thread = await self.agents_client.threads.create()
             
+            self._initialized = True
             logger.info(f"Successfully initialized with agent: {self.agent.id} and thread: {self.thread.id}")
             return True
             
         except Exception as e:
             logger.error(f"Initialization failed: {e}")
+            await self.cleanup()
             return False
     
     async def send_message_streaming(self, message: str, message_placeholder: cl.Message) -> str:
         """Send message to agent and stream response as it's generated"""
         try:
             # Check if clients, agent, and thread are properly initialized
-            if not self.agents_client:
+            if not self._initialized or not self.agents_client:
                 return "Error: Agents client not initialized"
             
             if not self.agent:
@@ -134,13 +137,20 @@ class AzureAIAgent:
             await message_placeholder.update()
             return error_response
     
-    async def close(self):
-        """Close the project client"""
-        if self.project_client:
-            await self.project_client.close()
-
-# Global agent instance
-agent = AzureAIAgent()
+    async def cleanup(self):
+        """Close the project client and reset state"""
+        try:
+            if self.project_client and self._initialized:
+                await self.project_client.close()
+                logger.info("Azure AI client closed successfully")
+        except Exception as e:
+            logger.warning(f"Error during cleanup: {e}")
+        finally:
+            self.project_client = None
+            self.agents_client = None
+            self.agent = None
+            self.thread = None
+            self._initialized = False
 
 @cl.on_chat_start
 async def start():
@@ -150,8 +160,14 @@ async def start():
         author="System"
     ).send()
     
+    # Create a new agent instance for this session
+    agent = AzureAIAgent()
+    
     if await agent.initialize():
         if agent.agent and agent.thread:
+            # Store the agent in user session
+            cl.user_session.set("agent", agent)
+            
             await cl.Message(
                 content=f"✅ Connected to Azure AI Agent: {agent.agent.id}\nThread: {agent.thread.id}\n\nHow can I help you?",
                 author="Assistant"
@@ -170,7 +186,10 @@ async def start():
 @cl.on_message
 async def main(message: cl.Message):
     """Handle user messages with streaming response"""
-    if not agent.agents_client or not agent.agent or not agent.thread:
+    # Get the agent from user session
+    agent = cl.user_session.get("agent")
+    
+    if not agent or not agent._initialized:
         await cl.Message(
             content="❌ Agent not initialized. Please restart the chat.",
             author="System"
@@ -190,7 +209,12 @@ async def main(message: cl.Message):
 @cl.on_chat_end
 async def end():
     """Clean up when chat ends"""
-    await agent.close()
+    # Get the agent from user session
+    agent = cl.user_session.get("agent")
+    
+    if agent:
+        await agent.cleanup()
+        cl.user_session.set("agent", None)
 
 if __name__ == "__main__":
     cl.run()
