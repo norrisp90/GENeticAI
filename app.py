@@ -2,7 +2,9 @@ import os
 import chainlit as cl
 from azure.ai.projects import AIProjectClient
 from azure.identity import ManagedIdentityCredential, DefaultAzureCredential
+from azure.core.exceptions import ClientAuthenticationError, HttpResponseError
 import asyncio
+import traceback
 from typing import Optional
 
 # Azure AI Foundry configuration
@@ -22,62 +24,118 @@ class AzureAIAgent:
         
     def initialize(self):
         """Initialize the Azure AI Project client and agent using system-assigned managed identity"""
+        print("=== Azure AI Foundry Initialization Debug Info ===")
+        
+        # Log environment variables (safely)
+        print(f"PROJECT_CONNECTION_STRING set: {bool(PROJECT_CONNECTION_STRING)}")
+        print(f"AGENT_ID: {AGENT_ID}")
+        print(f"AZURE_SUBSCRIPTION_ID set: {bool(AZURE_SUBSCRIPTION_ID)}")
+        print(f"AZURE_RESOURCE_GROUP: {AZURE_RESOURCE_GROUP}")
+        print(f"AZURE_PROJECT_NAME: {AZURE_PROJECT_NAME}")
+        
         try:
-            # Use system-assigned managed identity credential
-            # This will automatically use the managed identity assigned to the Azure resource
+            # Test managed identity credential first
+            print("\n--- Testing Managed Identity Credential ---")
             credential = ManagedIdentityCredential()
             
-            # Fallback to DefaultAzureCredential for local development
-            # DefaultAzureCredential will try multiple authentication methods including managed identity
-            fallback_credential = DefaultAzureCredential()
+            # Try to get a token to test the credential
+            try:
+                # Use Azure Resource Manager scope to test credential
+                token = credential.get_token("https://management.azure.com/.default")
+                print(f"✅ Managed Identity credential working - Token expires: {token.expires_on}")
+            except Exception as cred_error:
+                print(f"❌ Managed Identity credential test failed: {str(cred_error)}")
+                print(f"Error type: {type(cred_error).__name__}")
+                
+                # Try DefaultAzureCredential as fallback
+                print("\n--- Trying DefaultAzureCredential as fallback ---")
+                credential = DefaultAzureCredential()
+                try:
+                    token = credential.get_token("https://management.azure.com/.default")
+                    print(f"✅ DefaultAzureCredential working - Token expires: {token.expires_on}")
+                except Exception as default_cred_error:
+                    print(f"❌ DefaultAzureCredential also failed: {str(default_cred_error)}")
+                    raise Exception(f"Both credential types failed. Managed Identity: {cred_error}, Default: {default_cred_error}")
             
             # Initialize the client
+            print("\n--- Initializing AI Project Client ---")
             if PROJECT_CONNECTION_STRING:
-                # Use connection string with managed identity credential
+                print("Using PROJECT_CONNECTION_STRING...")
                 self.client = AIProjectClient.from_connection_string(
                     conn_str=PROJECT_CONNECTION_STRING,
                     credential=credential
                 )
+                print("✅ Client created with connection string")
             elif all([AZURE_SUBSCRIPTION_ID, AZURE_RESOURCE_GROUP, AZURE_PROJECT_NAME]):
-                # Alternative: construct client with individual parameters
+                print("Using individual Azure parameters...")
                 self.client = AIProjectClient(
                     credential=credential,
                     subscription_id=AZURE_SUBSCRIPTION_ID,
                     resource_group_name=AZURE_RESOURCE_GROUP,
                     project_name=AZURE_PROJECT_NAME
                 )
+                print("✅ Client created with individual parameters")
             else:
-                # Try with DefaultAzureCredential as fallback for local development
-                print("Using DefaultAzureCredential fallback for local development")
-                if PROJECT_CONNECTION_STRING:
-                    self.client = AIProjectClient.from_connection_string(
-                        conn_str=PROJECT_CONNECTION_STRING,
-                        credential=fallback_credential
-                    )
-                else:
-                    self.client = AIProjectClient(
-                        credential=fallback_credential
-                    )
+                raise Exception("Missing required configuration: either PROJECT_CONNECTION_STRING or all of (AZURE_SUBSCRIPTION_ID, AZURE_RESOURCE_GROUP, AZURE_PROJECT_NAME)")
             
-            # Get the agent
-            if AGENT_ID:
-                self.agent = self.client.agents.get_agent(AGENT_ID)
-                print(f"Using specified agent: {AGENT_ID}")
-            else:
-                # List available agents and use the first one
+            # Test client by trying to list agents
+            print("\n--- Testing Client Connection ---")
+            try:
                 agents = self.client.agents.list_agents()
-                if agents.data:
-                    self.agent = agents.data[0]
-                    cl.user_session.set("agent_id", self.agent.id)
-                    print(f"Using first available agent: {self.agent.id}")
+                print(f"✅ Successfully connected - Found {len(agents.data)} agents")
+                
+                # Get the agent
+                if AGENT_ID:
+                    print(f"Looking for specified agent: {AGENT_ID}")
+                    self.agent = self.client.agents.get_agent(AGENT_ID)
+                    print(f"✅ Using specified agent: {AGENT_ID}")
                 else:
-                    raise Exception("No agents found in the project")
-                    
-            print(f"Successfully initialized Azure AI client with agent: {self.agent.id}")
-            return True
+                    if agents.data:
+                        self.agent = agents.data[0]
+                        print(f"✅ Using first available agent: {self.agent.id}")
+                        cl.user_session.set("agent_id", self.agent.id)
+                    else:
+                        raise Exception("No agents found in the project")
+                        
+                print(f"✅ Successfully initialized Azure AI client with agent: {self.agent.id}")
+                return True
+                
+            except HttpResponseError as http_error:
+                print(f"❌ HTTP Error accessing agents: {http_error}")
+                print(f"Status Code: {http_error.status_code}")
+                print(f"Error Code: {http_error.error.code if hasattr(http_error, 'error') else 'N/A'}")
+                print(f"Error Message: {http_error.message}")
+                raise
+            except Exception as client_error:
+                print(f"❌ Error testing client connection: {str(client_error)}")
+                print(f"Error type: {type(client_error).__name__}")
+                raise
+                
+        except ClientAuthenticationError as auth_error:
+            print(f"\n❌ Authentication Error: {str(auth_error)}")
+            print("This typically means:")
+            print("1. Managed Identity is not enabled on the App Service")
+            print("2. Managed Identity doesn't have required permissions")
+            print("3. The Azure AI project resource is not accessible")
+            return False
+            
+        except HttpResponseError as http_error:
+            print(f"\n❌ HTTP Response Error: {str(http_error)}")
+            print(f"Status Code: {http_error.status_code}")
+            if hasattr(http_error, 'error'):
+                print(f"Error Code: {http_error.error.code}")
+                print(f"Error Message: {http_error.error.message}")
+            print("\nThis typically means:")
+            print("1. Resource not found (check subscription ID, resource group, project name)")
+            print("2. Insufficient permissions on the Azure AI project")
+            print("3. Network connectivity issues")
+            return False
             
         except Exception as e:
-            print(f"Error initializing Azure AI client: {str(e)}")
+            print(f"\n❌ Unexpected Error: {str(e)}")
+            print(f"Error Type: {type(e).__name__}")
+            print(f"Full traceback:\n{traceback.format_exc()}")
+            print("\nDetailed error information:")
             print("Make sure your system-assigned managed identity has the necessary permissions:")
             print("- Azure AI Developer role on the Azure AI project")
             print("- Contributor role on the resource group (if needed)")
@@ -91,6 +149,8 @@ class AzureAIAgent:
             return self.thread
         except Exception as e:
             print(f"Error creating thread: {str(e)}")
+            print(f"Error type: {type(e).__name__}")
+            print(f"Full traceback:\n{traceback.format_exc()}")
             return None
     
     async def send_message(self, message: str) -> str:
@@ -150,6 +210,8 @@ class AzureAIAgent:
             
         except Exception as e:
             print(f"Error sending message: {str(e)}")
+            print(f"Error type: {type(e).__name__}")
+            print(f"Full traceback:\n{traceback.format_exc()}")
             return f"I encountered an error: {str(e)}"
 
 # Initialize the Azure AI agent
@@ -184,15 +246,30 @@ async def start():
         await cl.Message(
             content="""❌ Failed to connect to Azure AI Foundry using Managed Identity.
 
-**Troubleshooting Steps:**
-1. Ensure your Azure resource has a system-assigned managed identity enabled
-2. Verify the managed identity has the required permissions:
-   - **Azure AI Developer** role on the Azure AI project
-   - **Contributor** role on the resource group (if needed)
-3. Check that your environment variables are correctly set
-4. For local development, ensure you're authenticated with `az login`
+**Check the Azure App Service logs for detailed error information.**
 
-Please check your configuration and try again.""",
+**Common Issues & Solutions:**
+
+🔧 **Managed Identity Issues:**
+- Enable system-assigned managed identity in App Service → Identity
+- Restart the App Service after enabling managed identity
+
+🔐 **Permission Issues:**
+- Assign **"Azure AI Developer"** role to the managed identity on the Azure AI project
+- Assign **"Cognitive Services OpenAI User"** role if using OpenAI models
+- Check role assignments in Azure AI project → Access Control (IAM)
+
+🌐 **Configuration Issues:**
+- Verify PROJECT_CONNECTION_STRING or individual Azure parameters
+- Ensure the Azure AI project exists and is accessible
+- Check network connectivity and firewall rules
+
+📋 **To get detailed logs:**
+1. Go to Azure App Service → Monitoring → Log stream
+2. Check the console output for detailed error messages
+3. Look for specific error codes and authentication failures
+
+Please check the Azure App Service logs and configuration, and try again.""",
             author="System"
         ).send()
         cl.user_session.set("initialized", False)
